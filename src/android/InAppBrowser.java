@@ -37,6 +37,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -76,14 +77,26 @@ import org.apache.cordova.PluginResult;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.StringTokenizer;
+
+import okhttp3.Headers;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 @SuppressLint("SetJavaScriptEnabled")
 public class InAppBrowser extends CordovaPlugin {
@@ -116,6 +129,8 @@ public class InAppBrowser extends CordovaPlugin {
     private static final String HIDE_URL = "hideurlbar";
     private static final String FOOTER = "footer";
     private static final String FOOTER_COLOR = "footercolor";
+    private static final String INTERCEPTED_XHR_URL = "interceptedxhrurl";
+    private static final String INTERCEPTED_XHR_URLS = "interceptedxhrurls";
     private static final String BEFORELOAD = "beforeload";
 
     private static final List customizableOptions = Arrays.asList(CLOSE_BUTTON_CAPTION, TOOLBAR_COLOR, NAVIGATION_COLOR, CLOSE_BUTTON_COLOR, FOOTER_COLOR);
@@ -147,6 +162,7 @@ public class InAppBrowser extends CordovaPlugin {
     private boolean showFooter = false;
     private String footerColor = "";
     private String beforeload = "";
+    private String interceptedXhrUrl = "";
     private String[] allowedSchemes;
     private InAppBrowserClient currentClient;
 
@@ -714,6 +730,10 @@ public class InAppBrowser extends CordovaPlugin {
             if (features.get(BEFORELOAD) != null) {
                 beforeload = features.get(BEFORELOAD);
             }
+            String xhrInterceptedUrlSet = features.get(INTERCEPTED_XHR_URL);
+            if (xhrInterceptedUrlSet != null) {
+                interceptedXhrUrl = features.get(INTERCEPTED_XHR_URL);
+            }
         }
 
         final CordovaWebView thatWebView = this.webView;
@@ -974,7 +994,7 @@ public class InAppBrowser extends CordovaPlugin {
                     }
 
                 });
-                currentClient = new InAppBrowserClient(thatWebView, edittext, beforeload);
+                currentClient = new InAppBrowserClient(thatWebView, edittext, beforeload, interceptedXhrUrl);
                 inAppWebView.setWebViewClient(currentClient);
                 WebSettings settings = inAppWebView.getSettings();
                 settings.setJavaScriptEnabled(true);
@@ -1151,10 +1171,13 @@ public class InAppBrowser extends CordovaPlugin {
      * The webview client receives notifications about appView
      */
     public class InAppBrowserClient extends WebViewClient {
+        private static final String TAG = "InAppBrowserClient";
         EditText edittext;
         CordovaWebView webView;
         String beforeload;
         boolean waitForBeforeload;
+        String interceptedXhrUrl;
+        boolean requestSend = false;
 
         /**
          * Constructor.
@@ -1162,11 +1185,12 @@ public class InAppBrowser extends CordovaPlugin {
          * @param webView
          * @param mEditText
          */
-        public InAppBrowserClient(CordovaWebView webView, EditText mEditText, String beforeload) {
+        public InAppBrowserClient(CordovaWebView webView, EditText mEditText, String beforeload, String interceptedXhrUrl) {
             this.webView = webView;
             this.edittext = mEditText;
             this.beforeload = beforeload;
             this.waitForBeforeload = beforeload != null;
+            this.interceptedXhrUrl = interceptedXhrUrl;
         }
 
         /**
@@ -1368,10 +1392,92 @@ public class InAppBrowser extends CordovaPlugin {
         @TargetApi(Build.VERSION_CODES.LOLLIPOP)
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+
+            String url = request.getUrl().toString();
+            if(url.contains(this.interceptedXhrUrl) && !this.interceptedXhrUrl.isEmpty()) { //check that interceptedurl is set
+                Log.i(LOG_TAG,"shouldInterceptRequest path:" + request.getUrl().getPath());
+                WebResourceResponse returnResponse = null;
+
+                //set the cookie to the request header
+                CookieManager instance = CookieManager.getInstance();
+                String cookie = instance.getCookie(request.getUrl().toString());
+                request.getRequestHeaders().put("Cookie", cookie);
+                request.getRequestHeaders().put("Sec-Fetch-Site", "same-origin");
+                request.getRequestHeaders().put("Sec-Fetch-Mode", "cors");
+                request.getRequestHeaders().put("Accept-Encoding", "gzip, deflate");
+
+                Headers headers = Headers.of(request.getRequestHeaders());
+                Request okRequest = new Request.Builder().url(request.getUrl().toString()).headers(headers).build();
+                try {
+                    OkHttpClient okHttpClient = new OkHttpClient();
+                    Response okResponse = null;
+                    if (!requestSend) {
+                        okResponse = okHttpClient.newCall(okRequest).execute();
+                        this.requestSend = true; //send the request only once
+                    }
+
+                    if (okResponse!=null) {
+                        int statusCode = okResponse.code();
+                        String encoding = "UTF-8";
+                        String mimeType = "application/json";
+                        String reasonPhrase = "OK";
+                        Map<String,String> responseHeaders = new HashMap<String,String>();
+                        if (okResponse.headers()!=null) {
+                            if (okResponse.headers().size()>0) {
+                                for (int i = 0; i < okResponse.headers().size(); i++) {
+                                    String key = okResponse.headers().name(i);
+                                    String value = okResponse.headers().value(i);
+                                    responseHeaders.put(key, value);
+
+                                }
+                            }
+                        }
+                        InputStream data = new ByteArrayInputStream(okResponse.body().string().getBytes(StandardCharsets.UTF_8));
+                        String responseXhrBody = inputStreamToString(data);
+                        //create the message object and send the event
+                        //in js code receive this by window.inAppBrowser.addEventListener('message', function(messageEvent) {})
+                        JSONObject obj = new JSONObject();
+                        obj.put("type", MESSAGE_EVENT);
+                        obj.put("body", responseXhrBody);
+                        sendUpdate(obj, true);
+                        //return null - that mean you pass the unchanged response body && headers
+                        return null;
+                    } else {
+                        Log.w(LOG_TAG,"okResponse fail");
+                    }
+                } catch (IOException e) {
+                    LOG.e(LOG_TAG, e.toString());
+                } catch (JSONException e) {
+                    LOG.e(LOG_TAG, e.toString());
+                }
+                return returnResponse;
+
+            }
             return shouldInterceptRequest(request.getUrl().toString(), super.shouldInterceptRequest(view, request), request.getMethod());
         }
 
+        private String inputStreamToString(InputStream is) {
+            String rLine = "";
+            StringBuilder answer = new StringBuilder();
+
+            InputStreamReader isr = new InputStreamReader(is);
+
+            BufferedReader rd = new BufferedReader(isr);
+
+            try {
+                while ((rLine = rd.readLine()) != null) {
+                    answer.append(rLine);
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            return answer.toString();
+        }
+
         public WebResourceResponse shouldInterceptRequest(String url, WebResourceResponse response, String method) {
+            if (response != null) {
+                LOG.e(LOG_TAG, "WEB RESPONSE" + url  + "METHOD: " + method);
+            }
             return response;
         }
 
