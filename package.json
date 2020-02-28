@@ -1,10 +1,10 @@
 {
-  "name": "cordova-plugin-inappbrowser",
+  "name": "cordova-plugin-inappbrowser-xhr-interceptor",
   "version": "3.2.0",
   "description": "Cordova InAppBrowser Plugin",
   "types": "./types/index.d.ts",
   "cordova": {
-    "id": "cordova-plugin-inappbrowser",
+    "id": "cordova-plugin-inappbrowser-xhr-interceptor",
     "platforms": [
       "android",
       "browser",
@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/apache/cordova-plugin-inappbrowser"
+    "url": "https://github.com/apache/cordova-plugin-inappbrowser-xhr-interceptor"
   },
   "bugs": {
     "url": "https://github.com/apache/cordova-plugin-inappbrowser/issues"
